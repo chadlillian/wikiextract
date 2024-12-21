@@ -1,0 +1,66 @@
+#!/home/chad/anaconda/bin/python
+
+from multiprocessing import Pool
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfTransformer
+from scipy.sparse import vstack
+import pandas as pd
+import numpy as np
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+from scipy import sparse
+from collections import Counter
+import pickle
+import glob
+import spacy
+import sys
+from ctypes import *
+
+def lemmatizeSingleDF(infilename,outfilename,hdfkey,nlp):
+    print(infilename,outfilename,hdfkey)
+    df = pd.read_hdf(infilename,key=hdfkey)
+
+    df['lemmas'] = df['text'].apply(lambda x:' '.join([y.lemma_ for y in nlp(x[:900_000])])) # lemmatizer
+
+    cols = [c for c in df.columns if c.find('text')<0]
+    df[cols].to_hdf(outfilename,key=hdfkey)
+
+def process_chunk(n,hkeys):
+    nlp = spacy.load('en_core_web_sm')
+    libc = CDLL("libc.so.6")
+
+    for i,hk in enumerate(hkeys):
+        #print(i,libc.sched_getcpu(),hk,flush=True)
+        lemmatizeSingleDF('titles.hdf','lemmas_{n}.hdf'.format(n=n),hk,nlp)
+
+if __name__ == '__main__':
+    d = pd.HDFStore('titles.hdf')
+    hdfkeys = list(d.keys())
+    d.close()
+
+    if False:
+        n_chunks = 8
+        # get vocabulary counts from all documents
+        chunks = [(i,hdfkeys[i::n_chunks]) for i in range(n_chunks)]
+        with Pool() as pool:
+            results = pool.starmap(process_chunk, chunks)
+            #results,titles = pool.starmap(process_chunk2, chunks)
+    
+    if False:
+       concatenate titles from all dfs into single df
+        alltitles = []
+        for fn in glob.glob('lemmas_*.hdf'):
+            print(fn)
+            d = pd.HDFStore(fn)
+            hdfkeys = list(d.keys())
+            d.close()
+    
+            for k in hdfkeys:
+                print(k)
+                df = pd.read_hdf(fn,key=k)
+                #df.to_hdf('lemmas.hdf',key=k)
+                alltitles.append(df['title'])
+        tt = pd.concat(alltitles)
+        tt.to_hdf('lemmas.hdf',key='titles')
+        
+

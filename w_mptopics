@@ -1,0 +1,197 @@
+#!/home/chad/anaconda/bin/python
+
+#import multiprocessing as mp
+from multiprocessing import Pool
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfTransformer
+from scipy.sparse import vstack
+import pandas as pd
+import numpy as np
+from scipy import sparse
+from collections import Counter
+import pickle
+import glob
+from ctypes import *
+import scipy as sp
+
+N = 200
+N = -1
+
+
+#   count lemmas from each chunk
+def readSingleDF(filename,hdfkey):
+    vectorizer = CountVectorizer()
+    try:
+        df = pd.read_hdf(filename,key=hdfkey)
+
+        corpus = df['lemmas']
+
+        counts = vectorizer.fit_transform(corpus)
+        vocabd = vectorizer.vocabulary_
+
+        wordcounts = np.squeeze(np.array(np.sum(counts,axis=0))) # number of documents each word appears in
+        counts.data = np.ones(counts.data.shape)
+        doccounts = np.squeeze(np.array(np.sum(counts,axis=0))) # number of documents each word appears in
+        doccounts_ = {word:doccounts[vocabd[word]] for word in vocabd.keys()}
+        wordcounts_ = {word:wordcounts[vocabd[word]] for word in vocabd.keys()}
+
+    except:
+        doccounts_ = Counter()
+        wordcounts_ = Counter()
+
+    return doccounts_, wordcounts_
+
+#   count lemmas from each group of chunks
+def process_chunk(hkeys):
+    libc = CDLL("libc.so.6")
+
+    Docs = Counter()
+    Words = Counter()
+    for i,hk in enumerate(hkeys):
+        print(i,libc.sched_getcpu(),hk,len(Words),flush=True)
+        dcs,wcs = readSingleDF('lemmas.hdf',hk)
+        Docs = Docs+Counter(dcs)
+        Words = Words+Counter(wcs)
+
+    return Docs,Words
+
+#   count lemmas from each wiki page, create and save a countvectorizer and a word frequency csv file
+def getLemmaCounts(vecfilename,wordfreqsfilename,chunks,cutoff=1):
+    with Pool() as pool:
+        z = pool.map(process_chunk, chunks)
+#        docs = z[0]
+#        words = z[1]
+    
+    print('done counting documents')
+    Words = Counter()
+    Docs = Counter()
+    for zz in z:
+        Words = Words+zz[1]
+        Docs = Docs+zz[0]
+
+#    Words = Counter()
+#    for w in words:
+#        Words = Words+w
+#
+#    Docs = Counter()
+#    for d in docs:
+#        Docs = Docs+d
+
+    print('done compiling counts')
+    vocab = [] 
+    z = []
+    for w,c in Docs.items():
+        if c>cutoff and w.isascii() and w.isalpha():
+            #docs[w] = c
+            #words[w] = Words[w]
+            z.append([w,c,Words[w]])
+            vocab.append(w)
+
+    z = np.array(z)
+    # make a countvectorizer from the complete vocabulary
+    cv = CountVectorizer(vocabulary=vocab)
+
+    print('number of lemmas found: ',len(vocab),'number of words found : ',len(Docs))
+
+    with open(vecfilename, 'wb') as f:
+        pickle.dump(cv, f)
+
+    pd.DataFrame({'lemma':z[:,0],'doc_count':z[:,1],'word_count':z[:,2]}).to_csv(wordfreqsfilename)
+
+################################################################################
+
+def countSingleDF(filename,hdfkey,cv):
+    df = pd.read_hdf(filename,key=hdfkey)
+    #dfi = df.loc[df['namespace']==0]
+
+    corpus = df['lemmas']
+    cc = cv.transform(corpus)
+
+    #title =df[['title','id','node_id']]
+    #title.index = title['node_id']
+
+    sparse.save_npz("counts/counts_"+hdfkey.strip('/'),cc)
+    #title.to_csv("counts/counts_"+hdfkey.strip('/')+'.csv')
+
+    #if df.shape[0]!=title.shape[0]:
+    #    print(hdfkey,' TITLE NOT SAME SHAPE'*22)
+    #if df.shape[0]!=cc.shape[0]:
+    #    print(hdfkey,' NPZ NOT SAME SHAPE'*22)
+
+    return None #cc,title
+
+def process_chunk2(cv,hkeys):
+    for i,hk in enumerate(hkeys):
+        countSingleDF('lemmas.hdf',hk,cv)
+        print(i,hk,len(hkeys))#,len(counts))
+    return None
+
+#   count lemmas in each page from each df, save titles and counts
+def countTF(vecfilename,chunks):
+    with open(vecfilename,'rb') as f:
+        cv = pickle.load(f)
+    
+    # get vocabulary counts from all documents
+    chunks = [(cv,chunk) for chunk in chunks]
+
+    with Pool() as pool:
+        results = pool.starmap(process_chunk2, chunks)
+
+#   perform tfidf on entire dataset
+def readTF(tfidffilename,titlesfilename):
+    gc = glob.glob('counts/counts*.npz')
+    nums = [int(x.split('_')[2].split('.')[0]) for x in gc]
+    df = pd.DataFrame({'filename':gc,'num':nums})
+    df = df.sort_values('num')
+
+    print('compiling numpy count matrices ')
+
+    print('reading numpy count matrices ')
+
+    results = sparse.vstack([sp.sparse.load_npz(x) for x in df['filename']])
+    print(results.shape)
+
+    tft = TfidfTransformer()
+    print('initiated tfidf transformer')
+
+    tft.fit(results)
+    print('fit data')
+
+    del results
+    dfs = []
+    for x in df['filename']:
+        z = sp.sparse.load_npz(x)
+        ztf = tft.transform(z)
+        hdfkey = x.split('_')[-1].split('.')[0]
+        sparse.save_npz('counts/tfidf_'+hdfkey,ztf)
+        print('transformed and saved ',hdfkey)
+
+        kk = 'section_{nn}'.format(nn=hdfkey)
+        titles = pd.read_hdf('lemmas.hdf',key=kk)
+        dfs.append(titles['title'])
+
+    dfs = pd.concat(dfs).reset_index(drop=True)
+    dfs.to_hdf('lemmas.hdf',key='titles')
+
+################################################################################
+if __name__ == '__main__':
+    d = pd.HDFStore('lemmas.hdf')
+    hdfkeys = d.keys()
+    d.close()
+
+    n_chunks = 8  # Adjust as needed
+    #hdfkeys = hdfkeys[:6]
+
+    # get the vocabulary of all hdf keys
+    chunks = [hdfkeys[i::n_chunks] for i in range(n_chunks)]
+
+
+    if False:
+        getLemmaCounts('vectorizer.pkl','word_freqs.csv',chunks,cutoff=5)
+
+    if False: # vectorize each df from the keys
+        countTF('vectorizer.pkl',chunks)
+
+    if True:    #   tfidf each df from the keys
+        readTF('tfidf','titles.csv')
+

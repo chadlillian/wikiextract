@@ -1,0 +1,69 @@
+#!/home/chad/anaconda/bin/python
+
+import pandas as pd
+import numpy as np
+import scipy as sp
+import glob
+from sklearn.decomposition import TruncatedSVD
+import matplotlib.pyplot as plt
+import sys
+
+
+concattfidf = True
+concattfidf = True
+runpca = True
+
+if concattfidf:
+    # vstack tfidf arrays
+    keys = [x.split('_')[-1].split('.')[0] for x in glob.glob('counts/counts_*.npz')]
+    nums = [int(x) for x in keys]
+    tffiles = ['counts/tfidf_{k}.npz'.format(k=key) for key in keys]
+    titlesids = ['counts/counts_{k}.csv'.format(k=key) for key in keys]
+    df = pd.DataFrame({'num':nums,'key':keys,'tfidf_filename':tffiles,'titles_filename':titlesids})
+    df = df.sort_values('num')
+
+    #z = []
+    #for i,row in df.iterrows():
+    #    d = pd.read_csv(row['titles_filename'],nrows=5)
+    #    z.append(d.iloc[0]['node_id'])
+    #df['node_id'] = z
+    #df = df.sort_values('node_id')
+    #print(df)
+
+    q = []
+    w = []
+    files = list(zip(tffiles,titlesids))
+    for i,row in df.iterrows():
+        tffile = row['tfidf_filename']
+        titleidfilename = row['titles_filename']
+        qt = sp.sparse.load_npz(tffile)
+        qt = qt.astype('float32')
+        q.append(qt)
+
+        print(i,tffile,qt.dtype,qt.shape)
+    
+    print('building full matrix')
+    qq = sp.sparse.vstack(q)
+    print(qq.shape)
+    print('full matrix built')
+    sp.sparse.save_npz('counts/full_tfidf.npz',qq)
+    print('full matrix saved')
+
+    #w = pd.concat(w)
+    #w = w[['title','id']].reset_index(drop=True).copy()
+    #w.to_csv('edges_renumbered.csv')
+    #print('titles and ids saved')
+
+
+#if not concattfidf:
+#    #   load vstacked tfidf array
+#    qq = sp.sparse.load_npz('counts/full_tfidf.npz')
+
+if runpca:
+    a = sp.sparse.load_npz('counts/full_tfidf.npz')
+    print('loaded full tfidf matrix')
+    clf = TruncatedSVD(10)
+    ah = clf.fit_transform(a)
+    print('transformed data')
+    np.save('tfidf_pca',ah)
+    print('saved data')

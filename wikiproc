@@ -1,0 +1,173 @@
+#!/home/chad/anaconda/bin/python
+
+from multiprocessing import Pool
+import pandas as pd
+import numpy as np
+import glob
+import sys,os
+import spacy
+import scipy as sp
+from gensim import utils
+import json
+import re
+import kuzu
+import time
+from wiki_topics import ptfidf
+
+class wiki:
+    def __init__(self,dbname='',numprocs=1):
+        self.wikijsonfile = 'enwiki-latest.json.gz'
+
+        self.db = kuzu.Database(dbname)
+        self.conn = kuzu.Connection(self.db)
+
+        self.nlp = spacy.load('en_core_web_sm')
+        self.edges = pd.DataFrame({'FROM':[],'TO':[]})
+        self.numprocs = numprocs
+
+        self.ptfidf = ptfidf()
+
+    def cleanDB(self):
+        query = "DROP TABLE {tablename}"
+
+        print('database name = ',self.db.database_path)
+
+        tables = self.conn.execute("CALL show_tables() RETURN *;").get_as_df()
+        tables = tables.sort_values('type',ascending=False)
+        tg = tables.groupby('type')
+        for typ in ['REL_GROUP','REL','NODE']:
+            if typ in list(tg.groups.keys()):
+                for tn in tg.get_group(typ)['name']:
+                    q = query.format(tablename=tn)
+                    print(q)
+                    try:
+                        self.conn.execute(q)
+                    except:
+                        None
+
+    def createDB(self,numpca):
+        N = 10  # number of pca vectors
+        N = numpca
+
+        #   create pages node table
+        cols = ['title','lemmas']
+        columns = "(title STRING, lemmas STRING, PRIMARY KEY (title))"
+        query = "CREATE NODE TABLE pages{columns}".format(columns=columns)
+        self.conn.execute(query)
+
+        #   create pca node table
+        pcacols = ['pca_{i}'.format(i=i) for i in range(N)]
+        pcas = ', '.join([x+' DOUBLE' for x in pcacols])
+        columns = "(title STRING, "+pcas+", PRIMARY KEY (title))"
+        query = "CREATE NODE TABLE pca{columns}".format(columns=columns)
+        self.conn.execute(query)
+
+        q = "CREATE REL TABLE GROUP adj (FROM pages TO pages, From pca TO pca);"
+        self.conn.execute(q)
+
+    def fixlink(self,link):
+        if len(link)==0:
+            ret = None
+        elif len(link)==1:
+            ret = link.upper()
+        else:
+            ret = link[0].upper()+link[1:]
+        return ret
+
+    def lemmatizechunks(self,titles_,text_):
+        rettext = []
+        rettitle = []
+        for ti,tx in zip(titles_,text_):
+            txx = [y.lemma_ for y in self.nlp(tx)]#[:10]
+            txx = ' '.join(txx)
+            rettext.append(txx)
+            rettitle.append(ti)
+
+        return rettitle,rettext
+
+    def updateDB(self,source,target,titles,text,lemmatize=True,final=False):
+        n = self.numprocs
+
+        if lemmatize:
+            textchunks = [[titles[i::n],text[i::n]] for i in range(n)]
+            #   parallelize lemmatization
+            with Pool() as pool:
+                results = pool.starmap(self.lemmatizechunks,textchunks)
+
+            titles = []
+            texts = []
+            for r in results:
+                titles.extend(r[0])
+                texts.extend(r[1])
+
+        df = pd.DataFrame({'title':titles,'text':text})
+        self.ptfidf.getLemmaCounts(df,'text','title',numprocs=n)
+
+        df = df[['title','text']]
+        self.conn.execute("COPY pages FROM df")
+
+        newedges = pd.DataFrame({'FROM':source,'TO':target})
+        self.edges = pd.concat([self.edges,newedges])
+
+        if final:
+            #   remove any edges with non-existent nodes
+            titles = self.conn.execute("MATCH (t:pages) RETURN t.title as title").get_as_df()
+            edges = self.edges.merge(titles,'inner',left_on='TO',right_on='title')[['FROM','TO']]
+
+            self.conn.execute("COPY adj_pages_pages FROM edges")
+            #self.conn.execute("COPY adj_pca_pca FROM edges")
+            aa = self.conn.execute("MATCH p=(a:pages) RETURN count(p) as total").get_as_df()
+            aa = self.conn.execute("MATCH p=(a:pages)-[:adj_pages_pages]->(b:pages) RETURN count(p) as total").get_as_df()
+
+            t0 = time.perf_counter()
+            pcadf = self.ptfidf.finishLemmaCounts()
+            print('finishLemmaCounts = ',time.perf_counter()-t0)
+
+            self.conn.execute("COPY pca FROM pcadf")
+
+    def json2db(self):
+        N = 1_000
+        with utils.open(self.wikijsonfile, 'rb') as f:
+            source = []
+            target = []
+            text = []
+            titles = []
+            i = 0
+            for line in f:
+                # decode each JSON line into a Python dictionary object
+                article = json.loads(line)
+        
+                # each article has a "title", a mapping of interlinks and a list of "section_titles" and
+                # "section_texts".
+                t = ' '.join([st for st in article['section_texts']])
+                t = re.sub(r'\W+',' ',t)
+        
+                targets = [self.fixlink(l[0]) for l in article['interlinks']]
+                sources = [self.fixlink(article['title'])]*len(targets)
+        
+                source.extend(sources)
+                target.extend(targets)
+                text.append(t)
+                titles.append(article['title'])
+        
+                i = i+1
+                if i%N==0:
+                    t0 = time.perf_counter()
+                    self.updateDB(source,target,titles,text,lemmatize=False)
+                    print('updateDB ',i,time.perf_counter()-t0)
+                    source = []
+                    target = []
+                    text = []
+                    titles = []
+        
+                if i>10_000:
+                    break
+            # insert last group
+            self.updateDB(source,target,titles,text,final=True,lemmatize=False)
+
+#    def calcPCA(self):
+
+w = wiki(dbname="wiki_db_test",numprocs=8)
+w.cleanDB()
+w.createDB(numpca=10)
+w.json2db()
