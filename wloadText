@@ -1,0 +1,93 @@
+#!/home/chad/anaconda3/bin/python
+
+import pandas as pd
+import numpy as np
+import glob
+import sys,os
+import spacy
+import scipy as sp
+from gensim import utils
+import json
+import re
+
+def fixlink(x):
+    if len(x)==0:
+        ret = None
+    elif len(x)==1:
+        ret = x.upper()
+    else:
+        ret = x[0].upper()+x[1:]
+    return ret
+
+# iterate over the plain text data we just created
+source = []
+target = []
+text = []
+titles = []
+coords = []
+categories = []
+N = 100_000
+
+rdrs = pd.read_csv('redirects.csv')
+with utils.open('enwiki-latest.json.gz', 'rb') as f:
+#with utils.open('latest.json.gz', 'rb') as f:
+    n = 0
+    i = 0
+    for line in f:
+        # decode each JSON line into a Python dictionary object
+        article = json.loads(line)
+
+        # each article has a "title", a mapping of interlinks and a list of "section_titles" and
+        # "section_texts".
+        t = ""
+        for section_text in article['section_texts']:
+            t = t+section_text.strip()
+
+        t = re.sub(r'\W+',' ',t)
+
+        targets = [fixlink(l[0]) for l in article['interlinks']]
+        sources = [article['title']]*len(targets)
+
+        source.extend(sources)
+        target.extend(targets)
+        text.append(t)
+        titles.append(article['title'])
+        coords.append(article['coordinates'])
+        categories.append(article['categories'])
+
+        i = i+1
+        if i%N==0:
+            df = pd.DataFrame({'title':titles,'text':text})
+            edges = pd.DataFrame({'FROM':source,'TO':target})
+            z = edges.merge(rdrs,'left',left_on='TO',right_on='from')
+            m = z['to'].notna()
+            edges.loc[m,'TO'] = z.loc[m,'to']
+
+
+            key = 'section_{n}'.format(n=n)
+            df = pd.DataFrame({'title':titles,'text':text,'categories':categories,'coordinates':coords})
+            df.to_hdf('titles.hdf',key=key)
+            edges.to_hdf('edges.hdf',key=key)
+
+            print(n*N,len(source))
+
+            source = []
+            target = []
+            text = []
+            titles = []
+            coords = []
+            categories = []
+
+            n = n+1
+
+    # insert last group
+    df = pd.DataFrame({'title':titles,'text':text,'categories':categories,'coordinates':coords})
+    edges = pd.DataFrame({'FROM':source,'TO':target})
+    z = edges.merge(rdrs,'left',left_on='TO',right_on='from')
+    m = z['to'].notna()
+    edges.loc[m,'TO'] = z.loc[m,'to']
+    
+    
+    key = 'section_{n}'.format(n=n)
+    df.to_hdf('titles.hdf',key=key)
+    edges.to_hdf('edges.hdf',key=key)

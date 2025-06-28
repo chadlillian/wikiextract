@@ -1,0 +1,116 @@
+#!/home/chad/anaconda3/bin/python
+
+from neo4j import GraphDatabase
+import glob
+import sys
+import random
+
+
+uri="bolt://localhost:7687"
+driver = GraphDatabase.driver(uri,auth=("neo4j","wwwwwwww"))
+with driver.session() as session:
+    result = session.run('SHOW DATABASES')
+    for record in result:
+        print(record['name'])
+driver.close()
+
+class GraphSubsampler:
+    def __init__(self, uri, db, user, password):
+        self.driver = GraphDatabase.driver(uri, database=db, auth=(user, password))
+
+    def close(self):
+        self.driver.close()
+
+    def _get_node_and_neighbors(self, tx, node_id, n_neighbors):
+        """Fetches a specific node and a sample of its neighbors."""
+        query = """
+        MATCH (n) WHERE id(n) = {node_id}
+        OPTIONAL MATCH (n)-[r]-(neighbor)
+        WITH n, collect(neighbor) AS all_neighbors
+        RETURN n, all_neighbors AS sampled_neighbors
+        """.format(node_id=node_id,n_neighbors=n_neighbors)
+        query = """
+        MATCH (n) WHERE id(n) = $node_id
+        OPTIONAL MATCH (n)-[r]-(neighbor)
+        WITH n, collect(neighbor) AS all_neighbors
+        RETURN n, CASE
+                   WHEN size(all_neighbors) <= $n_neighbors THEN all_neighbors
+                   ELSE randomsublist(all_neighbors, $n_neighbors)
+               END AS sampled_neighbors
+        """.format(node_id=node_id,n_neighbors=n_neighbors)
+        #result = tx.run(query, node_id=node_id, n_neighbors=n_neighbors)
+        result = tx.run(query)
+        record = result.single()
+        if record:
+            node = record["n"]
+            neighbors = record["sampled_neighbors"]
+            return node, neighbors
+        return None, None
+
+    def _get_random_nodes(self, tx, num_nodes, node_label=None):
+        """Fetches a specified number of random nodes from the database."""
+        query = "MATCH (n"
+        if node_label:
+            query += f":{node_label}"
+        query += ") RETURN id(n) AS node_id, labels(n) AS labels LIMIT $num_nodes"
+        result = tx.run(query, num_nodes=num_nodes)
+        return [record["node_id"] for record in result]
+
+    def subsample_graph(self, num_nodes_to_sample, n_neighbors, node_label=None):
+        """
+        Subsamples a graph by selecting a specified number of random nodes
+        and then sampling N of their neighbors.
+
+        Args:
+            num_nodes_to_sample (int): The number of central nodes to sample.
+            n_neighbors (int): The number of neighbors to sample for each central node.
+            node_label (str, optional): An optional node label to filter by. Defaults to None (all nodes).
+
+        Returns:
+            dict: A dictionary where keys are the IDs of the sampled central nodes
+                  and values are lists of the IDs of their sampled neighbors.
+                  Returns None if no nodes are found.
+        """
+        with self.driver.session() as session:
+            central_node_ids = session.execute_read(self._get_random_nodes, num_nodes_to_sample, node_label)
+
+            if not central_node_ids:
+                return None
+
+            subsampled_data = {}
+            for node_id in central_node_ids:
+                node, neighbors = session.execute_read(self._get_node_and_neighbors, node_id, n_neighbors)
+                if node:
+                    neighbor_ids = [neighbor.id for neighbor in neighbors]
+                    subsampled_data[node.id] = neighbor_ids
+            return subsampled_data
+
+if __name__ == '__main__':
+    # Replace with your Neo4j connection details
+    #uri="bolt://localhost:7687"
+    #driver = GraphDatabase.driver(uri,database="wikipedia",auth=("neo4j","wwwwwwww"))
+    #session = driver.session()
+
+    uri = "bolt://localhost:7687"
+    user = "neo4j"
+    password = "wwwwwwww"
+    db = 'wikipedia'
+
+    subsampler = GraphSubsampler(uri, db, user, password)
+
+    # Example usage:
+    num_central_nodes = 20
+    num_neighbors_to_sample = 1
+    node_type_to_sample = "User"  # Optional: specify a node label
+
+    #subsampled_graph = subsampler.subsample_graph(num_central_nodes, num_neighbors_to_sample, node_type_to_sample)
+    subsampled_graph = subsampler.subsample_graph(num_central_nodes, num_neighbors_to_sample)
+
+    subsampler.close()
+
+    if subsampled_graph:
+        print(f"Subsampled {len(subsampled_graph)} central nodes with up to {num_neighbors_to_sample} neighbors each:")
+        for central_node_id, neighbor_ids in subsampled_graph.items():
+            print(f"Central Node ID: {central_node_id}, Neighbors IDs: {neighbor_ids}")
+    else:
+        print("No nodes found in the database.")

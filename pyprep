@@ -1,0 +1,32 @@
+#!/home/chad/anaconda3/bin/python
+
+from neo4j import GraphDatabase
+import glob
+import pandas as pd
+import sys
+import csv
+
+
+
+dfs = []
+with pd.HDFStore('titles.hdf','r') as store:
+    tks = store.keys()
+
+for i,tk in enumerate(tks):
+    df = pd.read_hdf('titles.hdf',key=tk)
+    mask = df['title'].str.find('List of')>=0
+    df['batch'] = i
+    df['label'] = "article"
+    #df = df.loc[~mask]
+    dfs.append(df)
+    print(tk,df.shape)
+
+dd = pd.concat(dfs).reset_index(drop=True)
+#dd.to_parquet('neo4j_import.gzip')
+dd[['title']].to_csv('titles_indexed.csv',quoting=csv.QUOTE_NONNUMERIC, quotechar='"', header=False)
+
+ddg = dd.groupby('batch')
+for name,g in ddg:
+    g[['title','text','label']].to_csv('neo4j_import_nodes_{i}.csv'.format(i=name),quoting=csv.QUOTE_NONNUMERIC, quotechar='"', header=False)
+
+

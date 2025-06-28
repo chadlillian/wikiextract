@@ -1,0 +1,63 @@
+#!/home/chad/anaconda3/bin/python
+
+from neo4j import GraphDatabase
+import glob
+import sys
+
+uri="bolt://localhost:7687"
+driver = GraphDatabase.driver(uri,auth=("neo4j","wwwwwwww"))
+with driver.session() as session:
+    result = session.run('SHOW DATABASES')
+    for record in result:
+        print(record['name'])
+driver.close()
+
+uri="bolt://localhost:7687"
+driver = GraphDatabase.driver(uri,database="wikipedia",auth=("neo4j","wwwwwwww"))
+session = driver.session()
+
+# q = """
+# MATCH (n)
+# WHERE n.wikiID CONTAINS "United States"
+# MATCH (n)-->(relatedNode)
+# RETURN n.wikiID, relatedNode.wikiID, relatedNode.pca_0
+# """
+q = """
+MATCH (n)
+WHERE n.wikiID CONTAINS "Stanford University"
+MATCH (n)-->(relatedNode)
+RETURN n.wikiID, relatedNode.wikiID, relatedNode.pca_0
+"""
+q = f"""
+WITH 3 AS numberOfRandomNodes // Replace 3 with the desired number of random nodes
+
+// 2. Get a random sample of node IDs.
+MATCH (n) // Match all nodes in the graph
+WITH collect(id(n)) AS allNodeIds // Collect all node IDs into a list
+UNWIND allNodeIds AS id
+WITH id, rand() as random // Assign a random number to each node ID
+ORDER BY random // Order the node IDs by their random number
+LIMIT 10 // Select the top N node IDs
+WITH collect(id) AS seedNodeIds  // Collect the random node IDs
+RETURN seedNodeIds
+
+// // Given a list of node IDs (seed nodes), find their ego networks.
+// UNWIND seedNodeIds AS seedId  // Iterate through each seed node ID
+// 
+// MATCH (centerNode) WHERE id(centerNode) = seedId // Find the center node
+// WITH centerNode, seedId
+// 
+// // Expand from each center node to get its ego network.  Adjust the depth as needed.
+// MATCH (centerNode)-[:LINKS_TO*1..2]-(neighbor) // Replace 'REL_TYPE' with your relationship type, or use '*' for any.
+// WITH seedId, collect(centerNode) + collect(neighbor) as nodes, collect(centerNode)-[:LINKS_TO*1..2]-(neighbor) as relationships //collect the nodes and relationships
+// 
+// // Return the results for each seed node
+// RETURN seedId, 
+//        collect(DISTINCT nodes) AS egoNodes, // Collect distinct nodes in the ego network
+//        collect(DISTINCT relationships) AS egoRelationships // Collect distinct relationships
+
+    """
+a = session.run(q)
+print(a.to_df())
+print('*'*88)
+

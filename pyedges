@@ -1,0 +1,43 @@
+#!/home/chad/anaconda3/bin/python
+
+from neo4j import GraphDatabase
+import glob
+import pandas as pd
+import sys
+import csv
+
+dt = pd.read_hdf('lemmas.hdf',key='titles').to_frame('title')
+
+with pd.HDFStore('edges.hdf','r') as store:
+    tks = list(store.keys())
+c = 0
+
+for tk in tks:
+    df = pd.read_hdf('edges.hdf',key=tk)
+    df['type'] = 'LINKS_TO'
+    tkk = int(tk.split('_')[-1])
+    csvname = 'df/neo4j_import_relation_{tk:02d}.csv'.format(tk=tkk)
+    #df = df.merge(dt,'inner',left_on='FROM',right_on='title')
+    df = df.merge(dt,'inner',left_on='TO',right_on='title')
+    df = df[['FROM','TO']]
+    df.to_csv(csvname,index=False,header=False,quoting=csv.QUOTE_NONNUMERIC, quotechar='"')
+    print(tkk,tk,csvname)
+
+#    df = df.merge(dd,'left',left_on='FROM',right_on='title')
+#    df = df.rename(columns={'ID':'FROM_ID'})
+#    df = df[['FROM','TO','FROM_ID']]
+#
+#    df = df.merge(dd,'left',left_on='TO',right_on='title')
+#    df = df.rename(columns={'ID':'TO_ID'})
+#    df = df[['FROM','TO','FROM_ID','TO_ID']]
+#
+#    mask = (df['FROM_ID'].notna())&(df['TO_ID'].notna())
+#    df = df.loc[mask]
+#    df['FROM_ID'] = df['FROM_ID'].astype(int)
+#    df['TO_ID'] = df['TO_ID'].astype(int)
+#
+#    df['reltype'] = 'LINKS_TO'
+#
+#    tkk = tk.strip('/')
+#    df.to_hdf('neo4j_import.hdf',key = 'edges_{tk}'.format(tk=tkk))
+#    df[['FROM_ID','TO_ID','reltype']].to_csv('neo4j_import_{tk}.csv'.format(tk=tkk),index=False,header=False)

@@ -1,0 +1,29 @@
+#!/home/chad/anaconda3/bin/python
+
+from neo4j import GraphDatabase
+import glob
+import pandas as pd
+import sys
+import csv
+
+
+
+df = pd.read_hdf('lemmas.hdf',key='pca_titles')
+df['split'] = df.index//100000
+df[':Label'] = "article"
+df = df.rename(columns={'title':'wikiID:ID'})
+dfg = df.groupby('split')
+printcols = [c for c in df.columns if c.find('split')<0]
+
+#dd[['title']].to_csv('titles_indexed.csv',quoting=csv.QUOTE_NONNUMERIC, quotechar='"', header=False)
+
+header = ','.join(list(df[printcols].columns))
+out = open('df/neo4j_import_nodes_header.csv','w')
+out.write(header)
+out.close()
+#ho.to_csv('datafiles/neo4j_import_nodes_header.csv',header=True,index=False)
+for name,g in dfg:
+    g[printcols].to_csv('df/neo4j_import_nodes_{i}.csv'.format(i=name),quoting=csv.QUOTE_NONNUMERIC, quotechar='"', header=False,index=False)
+    print(name)
+
+

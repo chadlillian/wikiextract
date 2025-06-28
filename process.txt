@@ -1,0 +1,20 @@
+first download wikidump
+
+# convert wiki dump to json
+python -m segment_wiki -i -f enwiki-latest-pages-articles.xml.bz2 -o enwiki-latest.json.gz
+
+#   convert json to df
+wloadText   
+
+wikiproc
+
+
+#######
+python -m segment_wiki -i -f enwiki-latest-pages-articles.xml.bz2 -o enwiki-latest.json.gz > redirects.txt
+w_redirects
+wloadText   
+w_mplemma
+w_mptopics
+w_topicspca
+w_nodestocsvs
+pyedges

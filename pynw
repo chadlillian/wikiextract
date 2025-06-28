@@ -1,0 +1,128 @@
+#!/home/chad/anaconda3/bin/python
+
+from neo4j import GraphDatabase
+import glob
+import pandas as pd
+import sys
+import csv
+
+
+uri="bolt://localhost:7687"
+driver = GraphDatabase.driver(uri,database="test",auth=("neo4j","wwwwwwww"))
+session = driver.session()
+neo4jdir = "/home/chad/.config/Neo4j Desktop/Application/relate-data/dbmss/dbms-8be94f0d-eaaf-40be-b669-3c2dc7505c30/import/"
+
+ber = True  # edge read from hdf
+ber = False
+
+bew = True  # edge write to db
+bew = False
+
+bnr = True   # node read from hdf
+bnr = False
+
+bdd = True  # detach and delete all nodes/links
+bdd = False
+
+bnw = True  # node write
+bnw = False
+
+b4 = True
+b4 = False  # print all nodes
+
+b5 = False  # print all nodes
+b5 = True
+
+if bnr:
+    with pd.HDFStore('titles.hdf','r') as store:
+        tks = store.keys()
+        c = 0
+        for i,tk in enumerate(tks[:3]):
+            df = pd.read_hdf('titles.hdf',key=tks[0])
+            df = df[['title']]
+            df.index = df.index+c
+            df.to_csv(neo4jdir+'/w_titles_{i:02d}.csv'.format(i=i),quoting=csv.QUOTE_NONNUMERIC, quotechar='"', index_label="ID")
+            print('Saved : w_titles_{i:02d}.csv'.format(i=i))
+            c = df.index.max()+1
+
+if ber:
+    with pd.HDFStore('edges.hdf','r') as store:
+        tks = store.keys()
+        c = 0
+        for i,tk in enumerate(tks[:3]):
+            df = pd.read_hdf('edges.hdf',key=tks[0]).iloc[:1000]
+            df.index = df.index+c
+            df.to_csv(neo4jdir+'/w_edges_{i:02d}.csv'.format(i=i),quoting=csv.QUOTE_NONNUMERIC, quotechar='"', index_label="ID")
+            print('Saved : w_edges_{i:02d}.csv'.format(i=i))
+            c = df.index.max()+1
+
+if bdd:
+    q = """
+    MATCH (n:pages) DETACH DELETE n;
+    """
+    a = session.run(q)
+    print(a.to_df())
+    print('*'*88)
+
+
+if bnw:
+    pagefiles = [p.split('/')[-1] for p in glob.glob(neo4jdir+'/w_titles_*.csv')]
+    for pf in pagefiles:
+        print("Loading file : ",pf)
+        q = """
+        LOAD CSV WITH HEADERS FROM 'file:///{filename}' AS row
+        WITH row WHERE row.ID IS NOT NULL
+        MERGE (:pages {{ID: row.ID, title: row.title}});
+        """.format(filename=pf)
+        a = session.run(q)
+
+if bew:
+    pagefiles = [p.split('/')[-1] for p in glob.glob(neo4jdir+'/w_titles_*.csv')]
+    for pf in pagefiles:
+        print("Writing file : ",pf)
+        q = """
+        LOAD CSV WITH HEADERS FROM 'file:///{filename}' AS row
+        MATCH (p1:pages {{title:row.FROM}}), (p2:pages {{title:row.TO}})
+        CREATE (p1)-[:linksto]->(p2);
+        """.format(filename=pf)
+        a = session.run(q)
+        print(a.to_df())
+
+
+if b4:
+    q = """
+    MATCH (n:pages) RETURN n.ID, n.title
+    """
+    a = session.run(q)
+    print(a.to_df())
+    print('*'*88)
+
+if b5:
+    q = """
+    MATCH (p3:pages)-[l]->(p2:pages) RETURN p3.title, p2.title
+    """
+    a = session.run(q)
+    print(a.to_df())
+    print('*'*88)
+
+sys.exit()
+
+#linkfiles = glob.glob('wikilinks_*.csv')
+#for lf in linkfiles:
+#    q = """
+#    LOAD CSV WITH HEADERS FROM 'file:///{filename}' AS row
+#    MATCH (p1:pages {{ID:row.source}}), (p2:pages {{ID:row.target}})
+#    CREATE (p1)-[:linksto]->(p2);
+#    """.format(filename=lf)
+#    a = session.run(q)
+#    print(lf)
+#
+#
+#q = """
+#MATCH (a:pages)-[:linksto]->(b:pages)
+#RETURN a.pagename as source, b.pagename as target
+#"""
+#a = session.run(q)
+#print(a.to_df())
+#print('*'*88)
+

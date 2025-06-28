@@ -1,0 +1,104 @@
+#!/home/chad/anaconda3/bin/python
+import random
+from collections import defaultdict
+import torch
+from torch_geometric.data import Data
+from neo4j import GraphDatabase
+
+def fetch_ego_network(tx, seed_node_id, radius):
+    """Fetches the ego network of a given node up to a certain radius."""
+    query = f"""
+    MATCH (n) WHERE id(n) = $seed_id
+    CALL gds.graph.project.subgraph(
+      'ego_graph_{seed_node_id}_{radius}',
+      n, {{
+        relationship: {{
+          type: '*',
+          direction: 'BOTH',
+          minLevels: 1,
+          maxLevels: $radius
+        }}
+      }}
+    )
+    YIELD graphName, nodeCount, relationshipCount
+
+    WITH graphName
+    CALL gds.graph.export.pyg(graphName)
+    YIELD graph
+
+    CALL gds.graph.drop(graphName)
+    YIELD graphName AS droppedGraph
+    """
+    result = tx.run(query, seed_id=seed_node_id, radius=radius).single()
+    if result and result['graph']:
+        return result['graph']
+    return None
+
+def get_all_node_ids(tx):
+    """Fetches all node IDs in the graph."""
+    query = "MATCH (n) RETURN id(n) AS node_id"
+    result = tx.run(query)
+    return [record['node_id'] for record in result]
+
+def create_pyg_data(graph_info):
+    """Converts the Neo4j graph info into a PyG Data object."""
+    if not graph_info:
+        return None
+
+    edge_index = torch.tensor(graph_info['edge_index'], dtype=torch.long)
+    x = torch.tensor(graph_info['node_features'], dtype=torch.float) if 'node_features' in graph_info else None
+    y = torch.tensor(graph_info['node_labels'], dtype=torch.long) if 'node_labels' in graph_info else None
+
+    # You might need to adjust how you handle node features and labels
+    # based on your Neo4j schema.
+
+    return Data(x=x, edge_index=edge_index, y=y)
+
+def generate_random_ego_networks(driver, num_batches, nodes_per_batch, ego_radius):
+    """Generates a list of PyG Data objects representing random ego networks."""
+    with driver.session() as session:
+        all_node_ids = session.execute_read(get_all_node_ids)
+        if not all_node_ids:
+            return []
+
+        random.shuffle(all_node_ids)
+        batches = []
+        for i in range(num_batches):
+            start_index = i * nodes_per_batch
+            end_index = min((i + 1) * nodes_per_batch, len(all_node_ids))
+            batch_nodes = all_node_ids[start_index:end_index]
+
+            batch_graphs = []
+            for node_id in batch_nodes:
+                graph_info = session.execute_read(fetch_ego_network, seed_node_id=node_id, radius=ego_radius)
+                if graph_info:
+                    pyg_data = create_pyg_data(graph_info)
+                    if pyg_data:
+                        batch_graphs.append(pyg_data)
+
+            if batch_graphs:
+                # You might want to batch these individual PyG Data objects
+                # into a single Batch object using torch_geometric.data.Batch
+                batch = torch_geometric.data.Batch.from_data_list(batch_graphs)
+                batches.append(batch)
+
+        return batches
+
+# Example Usage:
+num_batches = 10
+nodes_per_batch = 5  # Number of seed nodes per batch
+ego_radius = 2
+
+uri="bolt://localhost:7687"
+driver = GraphDatabase.driver(uri,auth=("neo4j","wwwwwwww"))
+batches = generate_random_ego_networks(driver, num_batches, nodes_per_batch, ego_radius)
+
+if batches:
+    print(f"Generated {len(batches)} batches of ego networks.")
+    for i, batch in enumerate(batches):
+        print(f"Batch {i+1}: {batch}")
+        # Now you can use this 'batch' object to train your PyG neural network
+else:
+    print("Could not generate any batches.")
+
+close_driver()

@@ -1,0 +1,28 @@
+#!/home/chad/anaconda3/bin/python
+
+import pandas as pd
+import csv
+
+f = open('redirects.txt','r')
+frm = []
+too = []
+i = 0
+for line in f:
+    i += 1
+    if line.find('XXX')==0:
+        qline = line.strip('X').split(':::')
+        q0 = qline[0].strip()
+        q1 = qline[1].strip()
+        if q1[:9].lower()=='#redirect':
+            q1 = q1[9:].split('#')[0].strip()
+        else:
+            print(qline)
+
+        frm.append(q0)
+        too.append(q1)
+    if i%1_000_000==0:
+        print(i)
+
+df = pd.DataFrame({'from':frm,'to':too})
+df = df.drop_duplicates('from')
+df.to_csv('redirects.csv',quoting=csv.QUOTE_NONNUMERIC, quotechar='"', index=False)

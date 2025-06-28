@@ -1,0 +1,73 @@
+#!/home/chad/anaconda3/bin/python
+
+from neo4j import GraphDatabase
+import glob
+import sys
+
+uri="bolt://localhost:7687"
+driver = GraphDatabase.driver(uri,auth=("neo4j","wwwwwwww"))
+with driver.session() as session:
+    result = session.run('SHOW DATABASES')
+    for record in result:
+        print(record['name'])
+driver.close()
+
+uri="bolt://localhost:7687"
+driver = GraphDatabase.driver(uri,database="wikipedia",auth=("neo4j","wwwwwwww"))
+session = driver.session()
+
+if False:
+    q = """
+    MATCH (n:pages) DETACH DELETE n;
+    """
+    a = session.run(q)
+    print(a.to_df())
+    print('*'*88)
+    
+    pagefiles = glob.glob('wikipages_*.csv')
+    for pf in pagefiles:
+        q = """
+        LOAD CSV WITH HEADERS FROM 'file:///{filename}' AS row
+        WITH row WHERE row.ID IS NOT NULL
+        MERGE (:pages {{ID: row.ID, pagename: row.pagename, text: row.txt}});
+        """.format(filename=pf)
+        a = session.run(q)
+        print(pf)
+    
+    q = """
+    MATCH (n:pages) RETURN n.ID, n.pagename, n.text
+    """
+    a = session.run(q)
+    print(a.to_df())
+    print('*'*88)
+    
+    
+    linkfiles = glob.glob('wikilinks_*.csv')
+    for lf in linkfiles:
+        q = """
+        LOAD CSV WITH HEADERS FROM 'file:///{filename}' AS row
+        MATCH (p1:pages {{ID:row.source}}), (p2:pages {{ID:row.target}})
+        CREATE (p1)-[:linksto]->(p2);
+        """.format(filename=lf)
+        a = session.run(q)
+        print(lf)
+
+
+q = """
+MATCH (a{wikiID: "United States"})-->(relatedNode)
+RETURN relatedNode.wikiID, relatedNode.pca_0
+"""
+q = """
+MATCH (n)
+WHERE n.wikiID CONTAINS "United States"
+MATCH (n)-->(relatedNode)
+RETURN n.wikiID, relatedNode.wikiID, relatedNode.pca_0
+"""
+#q = """
+#MATCH (a:pages)-[:linksto]->(b:pages)
+#RETURN a.pagename as source, b.pagename as target
+#"""
+a = session.run(q)
+print(a.to_df())
+print('*'*88)
+

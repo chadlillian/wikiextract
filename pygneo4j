@@ -1,0 +1,191 @@
+#!/home/chad/anaconda3/bin/python
+import torch
+from torch_geometric.data import Data, Batch
+from torch_geometric.loader import NeighborSampler
+from neo4j import GraphDatabase
+from tqdm import tqdm  # For progress tracking
+
+# --- 1. Neo4j Connection Details ---
+uri = "bolt://localhost:7687"  # Replace with your Neo4j URI
+username = "neo4j"  # Replace with your Neo4j username
+password = "your_password"  # Replace with your Neo4j password
+
+# --- 2. Configuration for Batching and Sampling ---
+BATCH_SIZE = 128  # Adjust based on your memory constraints and desired batch size
+NUM_NEIGHBORS = [10, 5]  # Number of neighbors to sample in each layer for NeighborSampler
+NUM_WORKERS = 4      # Number of worker processes for data loading (if applicable)
+
+# --- 3. Function to Get All Node IDs from Neo4j ---
+def get_all_node_ids():
+    driver = GraphDatabase.driver(uri, auth=(username, password))
+    node_ids = []
+
+    def fetch_ids(tx):
+        result = tx.run("MATCH (n) RETURN id(n) AS node_id")
+        for record in result:
+            node_ids.append(record["node_id"])
+        return node_ids
+
+    with driver.session() as session:
+        node_ids = session.execute_read(fetch_ids)
+
+    driver.close()
+    return node_ids
+
+# --- 4. Function to Fetch Node and Neighbor Data in Batches ---
+def fetch_node_and_neighbor_data(node_ids):
+    driver = GraphDatabase.driver(uri, auth=(username, password))
+    node_data = {}
+    edge_list = []  # Store edges as (source_neo4j_id, target_neo4j_id)
+
+    def fetch_batch(tx, batch_of_ids):
+        # Fetch node features for the current batch
+        node_query = f"MATCH (n) WHERE id(n) IN $node_ids RETURN id(n) AS node_id, labels(n) AS labels, properties(n) AS properties"
+        nodes_result = tx.run(node_query, node_ids=batch_of_ids)
+        for record in nodes_result:
+            node_data[record["node_id"]] = {"labels": record["labels"], "properties": record["properties"]}
+
+        # Fetch edges connected to the current batch of nodes (can be optimized further)
+        edge_query = f"""
+            MATCH (n)-[r]->(m)
+            WHERE id(n) IN $node_ids
+            RETURN id(n) AS source_id, id(m) AS target_id
+            UNION ALL
+            MATCH (n)<-[r]-(m)
+            WHERE id(n) IN $node_ids
+            RETURN id(m) AS source_id, id(n) AS target_id
+        """
+        edges_result = tx.run(edge_query, node_ids=batch_of_ids)
+        for record in edges_result:
+            edge_list.append((record["source_id"], record["target_id"]))
+
+    with driver.session() as session:
+        for i in tqdm(range(0, len(node_ids), BATCH_SIZE), desc="Fetching Node and Edge Data"):
+            batch_ids = node_ids[i : i + BATCH_SIZE]
+            session.execute_read(fetch_batch, batch_ids)
+
+    driver.close()
+    return node_data, edge_list
+
+# --- 5. Function to Create PyG Subgraphs using Neighbor Sampling ---
+def create_subgraphs_with_sampling(node_ids, num_neighbors):
+    driver = GraphDatabase.driver(uri, auth=(username, password))
+    all_edges = {}  # Store all edges for efficient lookup
+
+    def fetch_all_edges(tx):
+        result = tx.run("MATCH (n)-[r]->(m) RETURN id(n) AS source, id(m) AS target")
+        edges = []
+        for record in result:
+            edges.append((record["source"], record["target"]))
+        return edges
+
+    with driver.session() as session:
+        all_edges_list = session.execute_read(fetch_all_edges)
+        # Convert to a set of tuples for faster lookup (undirected)
+        all_edges_set = set()
+        for u, v in all_edges_list:
+            all_edges_set.add(tuple(sorted((u, v))))
+
+    driver.close()
+
+    for i in tqdm(range(0, len(node_ids), BATCH_SIZE), desc="Creating Subgraphs"):
+        batch_of_seeds = node_ids[i : i + BATCH_SIZE]
+        # Implement neighbor sampling logic here. This is a simplified example.
+        # In a real scenario, you'd need to iteratively sample neighbors from Neo4j.
+
+        # For demonstration, let's just fetch the immediate neighbors of the seed nodes.
+        subgraphs = []
+        driver = GraphDatabase.driver(uri, auth=(username, password))
+
+        def fetch_neighbors(tx, seeds):
+            batch_nodes = {}
+            batch_edges = []
+            neighbor_ids = set(seeds)
+
+            # Fetch seed node information
+            node_query = f"MATCH (n) WHERE id(n) IN $node_ids RETURN id(n) AS node_id, labels(n) AS labels, properties(n) AS properties"
+            nodes_result = tx.run(node_query, node_ids=list(seeds))
+            for record in nodes_result:
+                batch_nodes[record["node_id"]] = {"labels": record["labels"], "properties": record["properties"]}
+
+            # Fetch neighbors and edges
+            neighbor_query = f"""
+                MATCH (n)-[]-(neighbor)
+                WHERE id(n) IN $seed_ids
+                RETURN id(n) AS source_id, id(neighbor) AS target_id
+            """
+            neighbors_result = tx.run(neighbor_query, seed_ids=list(seeds))
+            for record in neighbors_result:
+                if record["source_id"] not in batch_nodes:
+                    # Fetch neighbor node info if not already fetched
+                    neighbor_node_query = f"MATCH (n) WHERE id(n) = $node_id RETURN id(n) AS node_id, labels(n) AS labels, properties(n) AS properties"
+                    neighbor_res = tx.run(neighbor_node_query, node_id=record["target_id"])
+                    for nr in neighbor_res:
+                        batch_nodes[nr["node_id"]] = {"labels": nr["labels"], "properties": nr["properties"]}
+                    neighbor_ids.add(record["target_id"])
+                if record["target_id"] not in batch_nodes and record["target_id"] not in seeds:
+                    neighbor_node_query = f"MATCH (n) WHERE id(n) = $node_id RETURN id(n) AS node_id, labels(n) AS labels, properties(n) AS properties"
+                    neighbor_res = tx.run(neighbor_node_query, node_id=record["source_id"])
+                    for nr in neighbor_res:
+                        batch_nodes[nr["node_id"]] = {"labels": nr["labels"], "properties": nr["properties"]}
+                    neighbor_ids.add(record["source_id"])
+                batch_edges.append((record["source_id"], record["target_id"]))
+
+            # Create a mapping from Neo4j ID to local index in the subgraph
+            node_id_to_index = {node_id: i for i, node_id in enumerate(neighbor_ids)}
+
+            # Create node features (adapt based on your needs)
+            node_features_list = []
+            sorted_neighbor_ids = sorted(list(neighbor_ids))
+            for node_id in sorted_neighbor_ids:
+                node_info = batch_nodes.get(node_id, {"labels": [], "properties": {}})
+                # Basic feature example based on labels
+                if "User" in node_info["labels"]:
+                    node_features_list.append([1, 0])
+                elif "Product" in node_info["labels"]:
+                    node_features_list.append([0, 1])
+                else:
+                    node_features_list.append([0, 0])
+            x = torch.tensor(node_features_list, dtype=torch.float)
+
+            # Create edge indices
+            edge_index_list = []
+            for u, v in batch_edges:
+                if u in node_id_to_index and v in node_id_to_index:
+                    edge_index_list.append([node_id_to_index[u], node_id_to_index[v]])
+            edge_index = torch.tensor(edge_index_list, dtype=torch.long).t().contiguous() if edge_index_list else torch.empty((2, 0), dtype=torch.long)
+
+            subgraph_data = Data(x=x, edge_index=edge_index)
+            subgraphs.append(subgraph_data)
+
+        with driver.session() as session:
+            session.execute_read(fetch_neighbors, batch_of_seeds)
+        driver.close()
+        yield from subgraphs
+
+# --- 6. Training/Analysis Loop (Conceptual) ---
+if __name__ == "__main__":
+    all_node_ids = get_all_node_ids()
+
+    # Option 1: Process the entire graph in batches of nodes
+    # node_data, edge_list = fetch_node_and_neighbor_data(all_node_ids)
+    # # Now you would need to process these batches, potentially building local
+    # # subgraphs and performing your analysis.
+
+    # Option 2: Use Neighbor Sampling (Conceptual - requires more sophisticated implementation)
+    dataloader = create_subgraphs_with_sampling(all_node_ids, NUM_NEIGHBORS)
+    for batch in dataloader:
+        if batch.num_nodes > 0:
+            print("Processed Subgraph:")
+            print(batch)
+            # Perform your PyTorch/PyG analysis on this subgraph (e.g., train a GNN)
+            # Example (conceptual):
+            # optimizer.zero_grad()
+            # out = model(batch.x, batch.edge_index)
+            # loss = criterion(out, batch.y) # Assuming 'y' is available in the subgraph
+            # loss.backward()
+            # optimizer.step()
+        else:
+            print("Empty subgraph encountered.")
+
+    print("Analysis complete (in batches).")
